@@ -2,9 +2,6 @@ package parent
 
 import (
 	"context"
-	"encoding/binary"
-	"encoding/json"
-	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -21,6 +18,7 @@ import (
 
 	"github.com/rootless-containers/rootlesskit/pkg/api/router"
 	"github.com/rootless-containers/rootlesskit/pkg/common"
+	"github.com/rootless-containers/rootlesskit/pkg/msgutil"
 	"github.com/rootless-containers/rootlesskit/pkg/network"
 	"github.com/rootless-containers/rootlesskit/pkg/port"
 )
@@ -118,21 +116,32 @@ func Parent(pipeFDEnvKey string, opt *Opt) error {
 	}
 
 	// configure Port driver
+	portDriverInitComplete := make(chan struct{})
+	portDriverQuit := make(chan struct{})
+	portDriverErr := make(chan error)
 	if opt.PortDriver != nil {
-		opt.PortDriver.SetChildPID(cmd.Process.Pid)
+		msg.Port.Opaque = opt.PortDriver.OpaqueForChild()
+		go func() {
+			portDriverErr <- opt.PortDriver.RunParentDriver(portDriverInitComplete,
+				portDriverQuit, cmd.Process.Pid)
+		}()
 	}
 
+	// wake up the child
+	if _, err := msgutil.MarshalToWriter(pipeW, &msg); err != nil {
+		return err
+	}
+	if err := pipeW.Close(); err != nil {
+		return err
+	}
+	// wait for port driver to be ready
+	if opt.PortDriver != nil {
+		<-portDriverInitComplete
+	}
 	// listens the API
 	apiSockPath := filepath.Join(opt.StateDir, StateFileAPISock)
 	apiCloser, err := listenServeAPI(apiSockPath, &router.Backend{PortDriver: opt.PortDriver})
 	if err != nil {
-		return err
-	}
-	// wake up the child
-	if err := writeMessage(pipeW, &msg); err != nil {
-		return err
-	}
-	if err := pipeW.Close(); err != nil {
 		return err
 	}
 	// block until the child exits
@@ -143,17 +152,11 @@ func Parent(pipeFDEnvKey string, opt *Opt) error {
 	if err := apiCloser.Close(); err != nil {
 		return errors.Wrapf(err, "failed to close %s", apiSockPath)
 	}
-	return nil
-}
-
-func writeMessage(w io.Writer, msg *common.Message) error {
-	b, err := json.Marshal(msg)
-	if err != nil {
-		return err
+	// shut down port driver
+	if opt.PortDriver != nil {
+		portDriverQuit <- struct{}{}
+		err = <-portDriverErr
 	}
-	h := make([]byte, 4)
-	binary.LittleEndian.PutUint32(h, uint32(len(b)))
-	_, err = w.Write(append(h, b...))
 	return err
 }
 

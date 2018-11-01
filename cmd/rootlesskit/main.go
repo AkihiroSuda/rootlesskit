@@ -156,7 +156,7 @@ func createParentOpt(clicontext *cli.Context) (*parent.Opt, error) {
 		if err != nil {
 			return nil, err
 		}
-		opt.PortDriver, err = socat.New(&logrusDebugWriter{})
+		opt.PortDriver, err = socat.NewParentDriver(&logrusDebugWriter{})
 		if err != nil {
 			return nil, err
 		}

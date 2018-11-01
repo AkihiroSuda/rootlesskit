@@ -16,7 +16,7 @@ import (
 	"github.com/rootless-containers/rootlesskit/pkg/port"
 )
 
-func New(logWriter io.Writer) (port.ParentDriver, error) {
+func NewParentDriver(logWriter io.Writer) (port.ParentDriver, error) {
 	if _, err := exec.LookPath("socat"); err != nil {
 		return nil, err
 	}
@@ -41,10 +41,16 @@ type driver struct {
 	nextID      int
 }
 
-func (d *driver) SetChildPID(pid int) {
-	d.mu.Lock()
-	d.childPID = pid
-	d.mu.Unlock()
+func (d *driver) OpaqueForChild() map[string]string {
+	// NOP, as this driver does not have child-side logic.
+	return nil
+}
+
+func (d *driver) RunParentDriver(initComplete chan struct{}, quit <-chan struct{}, childPID int) error {
+	d.childPID = childPID
+	initComplete <- struct{}{}
+	<-quit
+	return nil
 }
 
 func (d *driver) AddPort(ctx context.Context, spec port.Spec) (*port.Status, error) {
@@ -108,7 +114,7 @@ func (d *driver) RemovePort(ctx context.Context, id int) error {
 }
 
 func createSocatCmd(ctx context.Context, spec port.Spec, logWriter io.Writer, childPID int) (*exec.Cmd, error) {
-	if spec.Proto != "tcp" && spec.Proto != "udp" {
+	if spec.Proto != "tcp" {
 		return nil, errors.Errorf("unsupported proto: %s", spec.Proto)
 	}
 	ipStr := "0.0.0.0"
@@ -188,4 +194,17 @@ func execRoutine(cf cmdFactory, stopCh <-chan struct{}, errWCh chan error, logWr
 			return
 		}
 	}
+}
+
+func NewChildDriver() port.ChildDriver {
+	return &childDriver{}
+}
+
+type childDriver struct {
+}
+
+func (d *childDriver) RunChildDriver(opaque map[string]string, quit <-chan struct{}) error {
+	// NOP
+	<-quit
+	return nil
 }

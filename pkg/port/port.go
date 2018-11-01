@@ -26,7 +26,17 @@ type Manager interface {
 // ParentDriver is a driver for the parent process.
 type ParentDriver interface {
 	Manager
-	SetChildPID(int)
+	// OpaqueForChild typically consists of socket path
+	// for controlling child from parent
+	OpaqueForChild() map[string]string
+	// RunParentDriver signals initComplete when ParentDriver is ready to
+	// serve as Manager.
+	// RunParentDriver blocks until quit is signaled.
+	// childPID can be used for ns-entering to the child namespaces.
+	// TODO: remove childPID from RunParentDriver, receive PID from opaque as SCM_CREDENTIALS instead?
+	RunParentDriver(initComplete chan struct{}, quit <-chan struct{}, childPID int) error
 }
 
-// TODO: add ChildDriver
+type ChildDriver interface {
+	RunChildDriver(opaque map[string]string, quit <-chan struct{}) error
+}
