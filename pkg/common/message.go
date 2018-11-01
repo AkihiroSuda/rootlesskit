@@ -6,6 +6,7 @@ type Message struct {
 	// StateDir cannot be empty
 	StateDir string
 	Network  NetworkMessage
+	Port     PortMessage
 }
 
 // NetworkMessage is empty for HostNetwork.
@@ -16,5 +17,9 @@ type NetworkMessage struct {
 	DNS     string
 	MTU     int
 	// Opaque strings are specific to driver
+	Opaque map[string]string
+}
+
+type PortMessage struct {
 	Opaque map[string]string
 }
