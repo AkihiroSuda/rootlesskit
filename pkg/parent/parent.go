@@ -136,7 +136,11 @@ func Parent(pipeFDEnvKey string, opt *Opt) error {
 	}
 	// wait for port driver to be ready
 	if opt.PortDriver != nil {
-		<-portDriverInitComplete
+		select {
+		case <-portDriverInitComplete:
+		case err = <-portDriverErr:
+			return err
+		}
 	}
 	// listens the API
 	apiSockPath := filepath.Join(opt.StateDir, StateFileAPISock)

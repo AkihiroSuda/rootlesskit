@@ -141,7 +141,11 @@ func testTCPWithPID(t *testing.T, d port.ParentDriver, childPID int) {
 	go func() {
 		driverErr <- d.RunParentDriver(initComplete, quit, childPID)
 	}()
-	<-initComplete
+	select {
+	case <-initComplete:
+	case err := <-driverErr:
+		t.Fatal(err)
+	}
 	var wg sync.WaitGroup
 	for c, p := range pairs {
 		childP, parentP := c, p
