@@ -29,6 +29,7 @@ type ParentDriver interface {
 	// OpaqueForChild typically consists of socket path
 	// for controlling child from parent
 	OpaqueForChild() map[string]string
+	FDsForChild() []int
 	// RunParentDriver signals initComplete when ParentDriver is ready to
 	// serve as Manager.
 	// RunParentDriver blocks until quit is signaled.
