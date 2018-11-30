@@ -29,12 +29,13 @@ type ParentDriver interface {
 	// OpaqueForChild typically consists of socket path
 	// for controlling child from parent
 	OpaqueForChild() map[string]string
-	FDsForChild() []int
 	// RunParentDriver signals initComplete when ParentDriver is ready to
 	// serve as Manager.
 	// RunParentDriver blocks until quit is signaled.
 	// childPID can be used for ns-entering to the child namespaces.
-	// TODO: remove childPID from RunParentDriver, receive PID from opaque as SCM_CREDENTIALS instead?
+	//
+	// TODO: remove childPID from RunParentDriver, let the parent receive the PID
+	// from the child via a socket specified in opaque, as SCM_CREDENTIALS instead?
 	RunParentDriver(initComplete chan struct{}, quit <-chan struct{}, childPID int) error
 }
 

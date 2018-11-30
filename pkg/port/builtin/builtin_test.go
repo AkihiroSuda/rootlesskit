@@ -3,7 +3,6 @@ package builtin
 import (
 	"io/ioutil"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/rootless-containers/rootlesskit/pkg/port"
@@ -23,9 +22,8 @@ func TestBuiltIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	socketPath := filepath.Join(tmpDir, ".builtin.sock")
 	pf := func() port.ParentDriver {
-		d, err := NewParentDriver(testsuite.TLogWriter(t, "builtin.Driver"), socketPath)
+		d, err := NewParentDriver(testsuite.TLogWriter(t, "builtin.Driver"), tmpDir)
 		if err != nil {
 			t.Fatal(err)
 		}

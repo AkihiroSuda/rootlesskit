@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
@@ -15,46 +19,61 @@ import (
 )
 
 const (
-	opaqueKeySocketPath = "builtin.socketpath"
+	opaqueKeySocketPath         = "builtin.socketpath"
+	opaqueKeyChildReadyPipePath = "builtin.readypipepath"
 )
 
 // NewParentDriver for builtin driver.
-// socketPath must not exist. The socket API is opaque.
-//
-// TODO: consider using socketpair FD instead of socket file
-func NewParentDriver(logWriter io.Writer, socketPath string) (port.ParentDriver, error) {
+func NewParentDriver(logWriter io.Writer, stateDir string) (port.ParentDriver, error) {
+	// TODO: consider using socketpair FD instead of socket file
+	socketPath := filepath.Join(stateDir, ".bp.sock")
+	childReadyPipePath := filepath.Join(stateDir, ".bp-ready.pipe")
+	if err := syscall.Mkfifo(childReadyPipePath, 0600); err != nil {
+		return nil, err
+	}
 	d := driver{
-		logWriter:  logWriter,
-		socketPath: socketPath,
-		ports:      make(map[int]*port.Status, 0),
-		nextID:     1,
+		logWriter:          logWriter,
+		socketPath:         socketPath,
+		childReadyPipePath: childReadyPipePath,
+		ports:              make(map[int]*port.Status, 0),
+		stoppers:           make(map[int]func() error, 0),
+		nextID:             1,
 	}
 	return &d, nil
 }
 
 type driver struct {
-	logWriter   io.Writer
-	socketPath  string
-	mu          sync.Mutex
-	ports       map[int]*port.Status
-	cmdStoppers map[int]func() error
-	nextID      int
+	logWriter          io.Writer
+	socketPath         string
+	childReadyPipePath string
+	mu                 sync.Mutex
+	ports              map[int]*port.Status
+	stoppers           map[int]func() error
+	nextID             int
 }
 
 func (d *driver) OpaqueForChild() map[string]string {
 	return map[string]string{
-		opaqueKeySocketPath: d.socketPath,
+		opaqueKeySocketPath:         d.socketPath,
+		opaqueKeyChildReadyPipePath: d.childReadyPipePath,
 	}
 }
 
 func (d *driver) RunParentDriver(initComplete chan struct{}, quit <-chan struct{}, _ int) error {
+	childReadyPipeR, err := os.OpenFile(d.childReadyPipePath, os.O_RDONLY, os.ModeNamedPipe)
+	if err != nil {
+		return err
+	}
+	if _, err = ioutil.ReadAll(childReadyPipeR); err != nil {
+		return err
+	}
+	childReadyPipeR.Close()
 	var dialer net.Dialer
-	// FIXME: socket might not exist yet!!
 	conn, err := dialer.Dial("unix", d.socketPath)
 	if err != nil {
 		return err
 	}
-	err = sendInitRequest(conn.(*net.UnixConn))
+	err = initiate(conn.(*net.UnixConn))
 	conn.Close()
 	if err != nil {
 		return err
@@ -65,18 +84,60 @@ func (d *driver) RunParentDriver(initComplete chan struct{}, quit <-chan struct{
 }
 
 func (d *driver) AddPort(ctx context.Context, spec port.Spec) (*port.Status, error) {
-	return nil, errors.New("unimplemented")
+	d.mu.Lock()
+	for id, p := range d.ports {
+		sp := p.Spec
+		// FIXME: add more ParentIP checks
+		if sp.Proto == spec.Proto && sp.ParentIP == spec.ParentIP && sp.ParentPort == spec.ParentPort {
+			d.mu.Unlock()
+			return nil, errors.Errorf("conflict with ID %d", id)
+		}
+	}
+	d.mu.Unlock()
+	routineErrorCh := make(chan error)
+	routineStopCh := make(chan struct{})
+	routineStop := func() error {
+		close(routineStopCh)
+		return <-routineErrorCh
+	}
+	go portRoutine(cf, routineStopCh, routineErrorCh, d.logWriter)
+	d.mu.Lock()
+	id := d.nextID
+	st := port.Status{
+		ID:   id,
+		Spec: spec,
+	}
+	d.ports[id] = &st
+	d.stoppers[id] = routineStop
+	d.nextID++
+	d.mu.Unlock()
+	return &st, nil
 }
 
 func (d *driver) ListPorts(ctx context.Context) ([]port.Status, error) {
-	return nil, nil
+	var ports []port.Status
+	d.mu.Lock()
+	for _, p := range d.ports {
+		ports = append(ports, *p)
+	}
+	d.mu.Unlock()
+	return ports, nil
 }
 
 func (d *driver) RemovePort(ctx context.Context, id int) error {
-	return errors.Errorf("unknown id: %d", id)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	stop, ok := d.stoppers[id]
+	if !ok {
+		return errors.Errorf("unknown id: %d", id)
+	}
+	err := stop()
+	delete(d.stoppers, id)
+	delete(d.ports, id)
+	return err
 }
 
-func sendInitRequest(c *net.UnixConn) error {
+func initiate(c *net.UnixConn) error {
 	req := request{
 		Type: requestTypeInit,
 	}
@@ -125,11 +186,23 @@ func (d *childDriver) RunChildDriver(opaque map[string]string, quit <-chan struc
 	if socketPath == "" {
 		return errors.New("socket path not set")
 	}
+	childReadyPipePath := opaque[opaqueKeyChildReadyPipePath]
+	if childReadyPipePath == "" {
+		return errors.New("child ready pipe path not set")
+	}
+	childReadyPipeW, err := os.OpenFile(childReadyPipePath, os.O_WRONLY, os.ModeNamedPipe)
+	if err != nil {
+		return err
+	}
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{
 		Name: socketPath,
 		Net:  "unix",
 	})
 	if err != nil {
+		return err
+	}
+	// write nothing, just close
+	if err = childReadyPipeW.Close(); err != nil {
 		return err
 	}
 	stopAccept := make(chan struct{}, 1)
@@ -182,6 +255,7 @@ func (d *childDriver) handleConnectInit(c *net.UnixConn, req *request) error {
 	_, err := msgutil.MarshalToWriter(c, nil)
 	return err
 }
+
 func (d *childDriver) handleConnectRequest(c *net.UnixConn, req *request) error {
 	switch req.Proto {
 	case "tcp":
