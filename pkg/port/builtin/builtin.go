@@ -100,7 +100,7 @@ func (d *driver) AddPort(ctx context.Context, spec port.Spec) (*port.Status, err
 		close(routineStopCh)
 		return <-routineErrorCh
 	}
-	go portRoutine(cf, routineStopCh, routineErrorCh, d.logWriter)
+	go portRoutine(d.socketPath, spec, routineStopCh, routineErrorCh, d.logWriter)
 	d.mu.Lock()
 	id := d.nextID
 	st := port.Status{
@@ -152,6 +152,95 @@ func initiate(c *net.UnixConn) error {
 		return err
 	}
 	return c.CloseRead()
+}
+
+func connect(c *net.UnixConn, spec port.Spec) (int, error) {
+	req := request{
+		Type:  requestTypeConnect,
+		Proto: spec.Proto,
+		Port:  spec.ChildPort,
+	}
+	if _, err := msgutil.MarshalToWriter(c, &req); err != nil {
+		return 0, err
+	}
+	if err := c.CloseWrite(); err != nil {
+		return 0, err
+	}
+	oobSpace := unix.CmsgSpace(4)
+	oob := make([]byte, oobSpace)
+	_, oobN, _, _, err := c.ReadMsgUnix(nil, oob)
+	if err != nil {
+		return 0, err
+	}
+	if oobN != oobSpace {
+		return 0, errors.Errorf("expected %d, got %d", oobSpace, oobN)
+	}
+	oob = oob[:oobN]
+	// FIXME!
+	// var rep reply
+	// if _, err := msgutil.UnmarshalFromReader(c, &rep); err != nil {
+	// 	return 0, err
+	// }
+	fd, err := parseFDFromOOB(oob)
+	if err != nil {
+		return 0, err
+	}
+	if err := c.CloseRead(); err != nil {
+		return 0, err
+	}
+	return fd, nil
+}
+
+func parseFDFromOOB(oob []byte) (int, error) {
+	scms, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return 0, err
+	}
+	if len(scms) != 1 {
+		return 0, errors.Errorf("unexpected scms: %v", scms)
+	}
+	scm := scms[0]
+	fds, err := unix.ParseUnixRights(&scm)
+	if err != nil {
+		return 0, err
+	}
+	if len(fds) != 1 {
+		return 0, errors.Errorf("unexpected fds: %v", fds)
+	}
+	return fds[0], nil
+}
+
+func portRoutine(socketPath string, spec port.Spec, stopCh <-chan struct{}, errWCh chan error, logWriter io.Writer) {
+	var dialer net.Dialer
+	conn, err := dialer.Dial("unix", socketPath)
+	if err != nil {
+		errWCh <- err
+		return
+	}
+	defer conn.Close()
+	ln, err := net.Listen(spec.Proto, fmt.Sprintf("%s:%d", spec.ParentIP, spec.ParentPort))
+	if err != nil {
+		errWCh <- err
+		return
+	}
+	defer ln.Close()
+	for {
+		ac, err := ln.Accept()
+		if err != nil {
+			errWCh <- err
+			return
+		}
+		defer ac.Close()
+		// get fd from the child as an SCM_RIGHTS cmsg
+		fd, err := connect(conn.(*net.UnixConn), spec)
+		if err != nil {
+			errWCh <- err
+			return
+		}
+		// copy fd
+		_ = fd
+		panic("unimplemented copyfd")
+	}
 }
 
 const (
